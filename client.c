@@ -1,3 +1,6 @@
+// run: $ ./chatserver <port>
+// $ ./chatclient <server_ip> <port>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
