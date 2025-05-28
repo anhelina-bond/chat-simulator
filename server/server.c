@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <stdarg.h>
 
 #define MAX_CLIENTS 15
 #define MAX_ROOMS 10
@@ -310,6 +311,7 @@ void* client_handler(void* arg) {
 }
 
 void* file_transfer_handler(void* arg) {
+    (void)arg; 
     while (server_running) {
         sem_wait(&upload_queue.items);
         
