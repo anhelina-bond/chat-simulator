@@ -152,7 +152,7 @@ int main(int argc, char* argv[]) {
     }
 
     log_message("[SERVER] Chat server started on port %d", port);
-    printf("Chat server listening on port %d\n", port);
+    printf("[INFO] Server listening on port %d...\n", port);
 
     // Start file transfer handler thread
     pthread_t file_thread;
@@ -248,6 +248,7 @@ void* client_handler(void* arg) {
     pthread_mutex_unlock(&clients_mutex);
 
     log_message("[LOGIN] user '%s' connected from %s", username, client_ip);
+    printf("[CONNECT] New client connected: %s from %s\n", username, client_ip); 
     send_to_client(client->socket, "[SUCCESS] Connected to chat server!\n");
     send_to_client(client->socket, "Commands: /join <room>, /leave, /broadcast <msg>, /whisper <user> <msg>, /sendfile <file> <user>, /exit\n");
 
@@ -429,6 +430,7 @@ void handle_join_room(Client* client, const char* room_name) {
     send_to_client(client->socket, msg);
     
     log_message("[JOIN] user '%s' joined room '%s'", client->username, room_name);
+    printf("[COMMAND] %s joined room '%s'\n", client->username, room_name); 
 }
 
 void handle_leave_room(Client* client) {
@@ -481,6 +483,7 @@ void handle_whisper(Client* client, const char* target, const char* message) {
     
     send_to_client(client->socket, "[SUCCESS] Whisper sent.\n");
     log_message("[WHISPER] %s to %s: %s", client->username, target, message);
+    printf("[COMMAND] %s sent whisper to %s\n", client->username, target); 
 }
 
 void handle_broadcast(Client* client, const char* message) {
@@ -492,6 +495,7 @@ void handle_broadcast(Client* client, const char* message) {
     broadcast_to_room(client->current_room, message, client->username);
     send_to_client(client->socket, "[SUCCESS] Message broadcasted.\n");
     log_message("[BROADCAST] user '%s': %s", client->username, message);
+    printf("[COMMAND] %s broadcasted to '%s'\n", client->username, client->current_room);
 }
 
 void handle_file_send(Client* client, const char* filename, const char* target) {
@@ -537,6 +541,7 @@ void handle_file_send(Client* client, const char* filename, const char* target) 
         send_to_client(client->socket, "[SUCCESS] File added to upload queue.\n");
         log_message("[FILE-QUEUE] Upload '%s' from %s added to queue. Queue size: %d", 
             filename, client->username, upload_queue.count);
+        printf("[COMMAND] %s initiated file transfer to %s\n", client->username, target);
     } else {
         send_to_client(client->socket, "[INFO] Upload queue full. Waiting...\n");
         
@@ -575,6 +580,7 @@ void cleanup_client(Client* client) {
     // Log disconnection
     if (strlen(client->username) > 0) {
         log_message("[DISCONNECT] user '%s' lost connection. Cleaned up resources.", client->username);
+        printf("[DISCONNECT] Client %s disconnected.\n", client->username); // NEW LINE
     }
 
     // Close socket and mark inactive
