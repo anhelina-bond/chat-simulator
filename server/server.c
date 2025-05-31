@@ -193,6 +193,7 @@ int main(int argc, char* argv[]) {
         clients[slot].addr = client_addr;
         clients[slot].active = 1;
         clients[slot].current_room[0] = '\0';
+        clients[slot].username[0] = '\0'; // Initialize username as empty
         pthread_mutex_unlock(&clients_mutex);
 
         // Create client handler thread
@@ -213,39 +214,48 @@ void* client_handler(void* arg) {
     char client_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &client->addr.sin_addr, client_ip, INET_ADDRSTRLEN);
 
-    // Request username
-    send_to_client(client->socket, "Enter username (max 16 chars, alphanumeric): ");
-    
-    int bytes = recv(client->socket, username, MAX_USERNAME_LEN, 0);
-    if (bytes <= 0) {
-        cleanup_client(client);
-        return NULL;
-    }
-    username[bytes] = '\0';
-    
-    // Remove newline
-    char* newline = strchr(username, '\n');
-    if (newline) *newline = '\0';
+    // Username registration loop - keep trying until valid unique username
+    while (server_running && client->active) {
+        // Request username
+        send_to_client(client->socket, "Enter username (max 16 chars, alphanumeric): ");
+        
+        int bytes = recv(client->socket, username, MAX_USERNAME_LEN, 0);
+        if (bytes <= 0) {
+            cleanup_client(client);
+            return NULL;
+        }
+        username[bytes] = '\0';
+        
+        // Remove newline
+        char* newline = strchr(username, '\n');
+        if (newline) *newline = '\0';
 
-    // Validate username
-    if (!validate_username(username)) {
-        send_to_client(client->socket, "[ERROR] Invalid username. Use alphanumeric characters only.\n");
-        cleanup_client(client);
-        return NULL;
-    }
+        // Validate username format
+        if (!validate_username(username)) {
+            send_to_client(client->socket, "[ERROR] Invalid username. Use alphanumeric characters only.\n");
+            continue; // Try again instead of disconnecting
+        }
 
-    // Check for duplicate username
-    pthread_mutex_lock(&clients_mutex);
-    if (find_client_by_username(username)) {
+        // Check for duplicate username
+        pthread_mutex_lock(&clients_mutex);
+        if (find_client_by_username(username)) {
+            pthread_mutex_unlock(&clients_mutex);
+            send_to_client(client->socket, "[ERROR] Username already taken. Choose another.\n");
+            log_message("[REJECTED] Duplicate username attempted: %s", username);
+            continue; // Try again instead of disconnecting
+        }
+
+        // Username is valid and unique, register it
+        strcpy(client->username, username);
         pthread_mutex_unlock(&clients_mutex);
-        send_to_client(client->socket, "[ERROR] Username already taken. Choose another.\n");
-        log_message("[REJECTED] Duplicate username attempted: %s", username);
+        break; // Exit the username registration loop
+    }
+
+    // If we got here but client is not active, it means server is shutting down or client disconnected
+    if (!client->active || !server_running) {
         cleanup_client(client);
         return NULL;
     }
-
-    strcpy(client->username, username);
-    pthread_mutex_unlock(&clients_mutex);
 
     log_message("[LOGIN] user '%s' connected from %s", username, client_ip);
     printf("[CONNECT] New client connected: %s from %s\n", username, client_ip); 
@@ -254,14 +264,14 @@ void* client_handler(void* arg) {
 
     // Main command loop
     while (server_running && client->active) {
-        bytes = recv(client->socket, buffer, BUFFER_SIZE - 1, 0);
+        int bytes = recv(client->socket, buffer, BUFFER_SIZE - 1, 0);
         if (bytes <= 0) {
             break;
         }
         buffer[bytes] = '\0';
 
         // Remove newline
-        newline = strchr(buffer, '\n');
+        char* newline = strchr(buffer, '\n');
         if (newline) *newline = '\0';
 
         if (strlen(buffer) == 0) continue;
@@ -580,7 +590,7 @@ void cleanup_client(Client* client) {
     // Log disconnection
     if (strlen(client->username) > 0) {
         log_message("[DISCONNECT] user '%s' lost connection. Cleaned up resources.", client->username);
-        printf("[DISCONNECT] Client %s disconnected.\n", client->username); // NEW LINE
+        printf("[DISCONNECT] Client %s disconnected.\n", client->username);
     }
 
     // Close socket and mark inactive
