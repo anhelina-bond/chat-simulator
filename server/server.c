@@ -330,38 +330,38 @@ void* file_transfer_handler(void* arg) {
 
         // Find receiver
         Client* receiver = find_client_by_username(transfer.receiver);
+        char sender_msg[512];  // Increased buffer size
+        
         if (receiver && receiver->active) {
+            // Notify receiver
             char notification[512];
             snprintf(notification, sizeof(notification), 
                 "[FILE] Received '%s' from %s (%zu bytes)\n", 
                 transfer.filename, transfer.sender, transfer.file_size);
             send_to_client(receiver->socket, notification);
             
-            log_message("[SEND FILE] '%s' sent from %s to %s (success)", 
-                transfer.filename, transfer.sender, transfer.receiver);
-
-            char sender_msg[256];
-            snprintf(sender_msg, sizeof(sender_msg), 
+            // Notify sender
+            snprintf(sender_msg, sizeof(sender_msg),
                 "[FILE] %s received your file '%s' (%zu bytes)\n",
                 transfer.receiver, transfer.filename, transfer.file_size);
             
-            Client* sender = find_client_by_username(transfer.sender);
-            if (sender && sender->active) {
-                send_to_client(sender->socket, sender_msg);
-            }
-        } else {
-            log_message("[SEND FILE] '%s' from %s to %s (failed - user offline)", 
+            log_message("[SEND FILE] '%s' sent from %s to %s (success)", 
                 transfer.filename, transfer.sender, transfer.receiver);
-                    char sender_msg[256];
+        } else {
+            // Notify sender of failure
             snprintf(sender_msg, sizeof(sender_msg),
                 "[FILE] Failed to send '%s' - %s offline\n",
                 transfer.filename, transfer.receiver);
             
-            Client* sender = find_client_by_username(transfer.sender);
-            if (sender && sender->active) {
-                send_to_client(sender->socket, sender_msg);
-            }
+            log_message("[SEND FILE] '%s' from %s to %s (failed - user offline)", 
+                transfer.filename, transfer.sender, transfer.receiver);
         }
+
+        Client* sender = find_client_by_username(transfer.sender);
+        if (sender && sender->active) {
+            send_to_client(sender->socket, sender_msg);
+        }
+        
 
         if (transfer.file_data) {
             free(transfer.file_data);
@@ -400,40 +400,45 @@ void send_to_client(int socket, const char* message) {
 void broadcast_to_room(const char* room_name, const char* message, const char* sender) {
     pthread_mutex_lock(&rooms_mutex);
     
-    Room* target_room = NULL;  // Declare pointer to store found room
-    
-    // Find the room
+    Room* target_room = NULL;
     for (int i = 0; i < MAX_ROOMS; i++) {
         if (rooms[i].active && strcmp(rooms[i].name, room_name) == 0) {
-            target_room = &rooms[i];  // Store pointer to the room
+            target_room = &rooms[i];
             break;
         }
     }
 
     if (target_room) {
-        // Format message for history
+        // Format message for history (without newline)
         char formatted_msg[BUFFER_SIZE];
         snprintf(formatted_msg, sizeof(formatted_msg), "[%s] %s: %s", room_name, sender, message);
 
-        // Add to history
+        // Add to history buffer
         if (target_room->history_count < 10) {
-            strcpy(target_room->history[target_room->history_count], formatted_msg);
+            strncpy(target_room->history[target_room->history_count], formatted_msg, MAX_MESSAGE_LEN+49);
+            target_room->history[target_room->history_count][MAX_MESSAGE_LEN+49] = '\0';
             target_room->history_count++;
         } else {
-            // Shift history
             for (int i = 0; i < 9; i++) {
-                strcpy(target_room->history[i], target_room->history[i+1]);
+                strncpy(target_room->history[i], target_room->history[i+1], MAX_MESSAGE_LEN+49);
+                target_room->history[i][MAX_MESSAGE_LEN+49] = '\0';
             }
-            strcpy(target_room->history[9], formatted_msg);
+            strncpy(target_room->history[9], formatted_msg, MAX_MESSAGE_LEN+49);
+            target_room->history[9][MAX_MESSAGE_LEN+49] = '\0';
         }
 
         // Broadcast to members
         for (int j = 0; j < target_room->member_count; j++) {
             if (target_room->members[j] && target_room->members[j]->active &&
                 strcmp(target_room->members[j]->username, sender) != 0) {
-                char client_msg[BUFFER_SIZE];
-                snprintf(client_msg, sizeof(client_msg), "%s\n", formatted_msg);
-                send_to_client(target_room->members[j]->socket, client_msg);
+                // Send with newline in separate buffer
+                char send_buffer[BUFFER_SIZE];
+                int len = snprintf(send_buffer, sizeof(send_buffer), "%s\n", formatted_msg);
+                if (len >= sizeof(send_buffer)) {
+                    send_buffer[sizeof(send_buffer)-2] = '\n';
+                    send_buffer[sizeof(send_buffer)-1] = '\0';
+                }
+                send_to_client(target_room->members[j]->socket, send_buffer);
             }
         }
     }
