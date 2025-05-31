@@ -400,32 +400,42 @@ void send_to_client(int socket, const char* message) {
 void broadcast_to_room(const char* room_name, const char* message, const char* sender) {
     pthread_mutex_lock(&rooms_mutex);
     
+    Room* target_room = NULL;  // Declare pointer to store found room
+    
+    // Find the room
     for (int i = 0; i < MAX_ROOMS; i++) {
         if (rooms[i].active && strcmp(rooms[i].name, room_name) == 0) {
-            for (int j = 0; j < rooms[i].member_count; j++) {
-                if (rooms[i].members[j] && rooms[i].members[j]->active &&
-                    strcmp(rooms[i].members[j]->username, sender) != 0) {
-                    char formatted_msg[BUFFER_SIZE];
-                    snprintf(formatted_msg, sizeof(formatted_msg), "[%s] %s: %s\n", room_name, sender, message);
-                    send_to_client(rooms[i].members[j]->socket, formatted_msg);
-                }
-            }
+            target_room = &rooms[i];  // Store pointer to the room
             break;
         }
     }
 
-    char formatted[BUFFER_SIZE];
-    snprintf(formatted, sizeof(formatted), "[%s] %s: %s", room_name, sender, message);
+    if (target_room) {
+        // Format message for history
+        char formatted_msg[BUFFER_SIZE];
+        snprintf(formatted_msg, sizeof(formatted_msg), "[%s] %s: %s", room_name, sender, message);
 
-    // Add to history
-    if (room->history_count < 10) {
-        strcpy(room->history[room->history_count], formatted);
-        room->history_count++;
-    } else {
-        // Shift history
-        for (int i=0; i<9; i++) 
-            strcpy(room->history[i], room->history[i+1]);
-        strcpy(room->history[9], formatted);
+        // Add to history
+        if (target_room->history_count < 10) {
+            strcpy(target_room->history[target_room->history_count], formatted_msg);
+            target_room->history_count++;
+        } else {
+            // Shift history
+            for (int i = 0; i < 9; i++) {
+                strcpy(target_room->history[i], target_room->history[i+1]);
+            }
+            strcpy(target_room->history[9], formatted_msg);
+        }
+
+        // Broadcast to members
+        for (int j = 0; j < target_room->member_count; j++) {
+            if (target_room->members[j] && target_room->members[j]->active &&
+                strcmp(target_room->members[j]->username, sender) != 0) {
+                char client_msg[BUFFER_SIZE];
+                snprintf(client_msg, sizeof(client_msg), "%s\n", formatted_msg);
+                send_to_client(target_room->members[j]->socket, client_msg);
+            }
+        }
     }
     
     pthread_mutex_unlock(&rooms_mutex);
