@@ -37,8 +37,9 @@ typedef struct {
     Client* members[MAX_CLIENTS];
     int member_count;
     int active;
+    char history[10][MAX_MESSAGE_LEN+50]; // History buffer
+    int history_count;
 } Room;
-
 typedef struct {
     char filename[256];
     char sender[MAX_USERNAME_LEN + 1];
@@ -338,9 +339,28 @@ void* file_transfer_handler(void* arg) {
             
             log_message("[SEND FILE] '%s' sent from %s to %s (success)", 
                 transfer.filename, transfer.sender, transfer.receiver);
+
+            char sender_msg[256];
+            snprintf(sender_msg, sizeof(sender_msg), 
+                "[FILE] %s received your file '%s' (%zu bytes)\n",
+                transfer.receiver, transfer.filename, transfer.file_size);
+            
+            Client* sender = find_client_by_username(transfer.sender);
+            if (sender && sender->active) {
+                send_to_client(sender->socket, sender_msg);
+            }
         } else {
             log_message("[SEND FILE] '%s' from %s to %s (failed - user offline)", 
                 transfer.filename, transfer.sender, transfer.receiver);
+                    char sender_msg[256];
+            snprintf(sender_msg, sizeof(sender_msg),
+                "[FILE] Failed to send '%s' - %s offline\n",
+                transfer.filename, transfer.receiver);
+            
+            Client* sender = find_client_by_username(transfer.sender);
+            if (sender && sender->active) {
+                send_to_client(sender->socket, sender_msg);
+            }
         }
 
         if (transfer.file_data) {
@@ -393,6 +413,20 @@ void broadcast_to_room(const char* room_name, const char* message, const char* s
             break;
         }
     }
+
+    char formatted[BUFFER_SIZE];
+    snprintf(formatted, sizeof(formatted), "[%s] %s: %s", room_name, sender, message);
+
+    // Add to history
+    if (room->history_count < 10) {
+        strcpy(room->history[room->history_count], formatted);
+        room->history_count++;
+    } else {
+        // Shift history
+        for (int i=0; i<9; i++) 
+            strcpy(room->history[i], room->history[i+1]);
+        strcpy(room->history[9], formatted);
+    }
     
     pthread_mutex_unlock(&rooms_mutex);
 }
@@ -431,6 +465,12 @@ void handle_join_room(Client* client, const char* room_name) {
     
     log_message("[JOIN] user '%s' joined room '%s'", client->username, room_name);
     printf("[COMMAND] %s joined room '%s'\n", client->username, room_name); 
+
+    for (int i = 0; i < room->history_count; i++) {
+        char hist_msg[BUFFER_SIZE];
+        snprintf(hist_msg, sizeof(hist_msg), "[HISTORY] %s\n", room->history[i]);
+        send_to_client(client->socket, hist_msg);
+    }
 }
 
 void handle_leave_room(Client* client) {
@@ -663,11 +703,13 @@ int validate_filename(const char* filename) {
 }
 
 Client* find_client_by_username(const char* username) {
+    pthread_mutex_lock(&clients_mutex);
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i].active && strcmp(clients[i].username, username) == 0) {
             return &clients[i];
         }
     }
+    pthread_mutex_unlock(&clients_mutex);
     return NULL;
 }
 
