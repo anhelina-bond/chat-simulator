@@ -177,8 +177,7 @@ void print_colored_message(const char* message) {
     }
     
     // Print prompt again if message doesn't end with newline
-    if (message[strlen(message)-1] != '\n') {
-        printf(COLOR_RESET);  // Reset to default color
+    if (message[strlen(message) - 1] != '\n') {
         printf("\n> ");
         fflush(stdout);
     }

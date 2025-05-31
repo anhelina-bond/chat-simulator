@@ -37,9 +37,8 @@ typedef struct {
     Client* members[MAX_CLIENTS];
     int member_count;
     int active;
-    char history[10][MAX_MESSAGE_LEN+50]; // History buffer
-    int history_count;
 } Room;
+
 typedef struct {
     char filename[256];
     char sender[MAX_USERNAME_LEN + 1];
@@ -167,18 +166,9 @@ int main(int argc, char* argv[]) {
 
         if (client_socket == -1) {
             if (server_running) {
-                // Only print error if server is still supposed to be running
-                if (errno != EINTR) {  // Ignore interrupted system calls
-                    perror("Accept failed");
-                }
+                perror("Accept failed");
             }
             continue;
-        }
-
-        // Check if server is still running after accept returns
-        if (!server_running) {
-            close(client_socket);
-            break;
         }
 
         // Find available client slot
@@ -196,20 +186,20 @@ int main(int argc, char* argv[]) {
             send_to_client(client_socket, "[ERROR] Server full. Try again later.\n");
             close(client_socket);
             continue;
+        }
+
+        // Initialize client
+        clients[slot].socket = client_socket;
+        clients[slot].addr = client_addr;
+        clients[slot].active = 1;
+        clients[slot].current_room[0] = '\0';
+        pthread_mutex_unlock(&clients_mutex);
+
+        // Create client handler thread
+        pthread_t client_thread;
+        pthread_create(&client_thread, NULL, client_handler, &clients[slot]);
+        pthread_detach(client_thread);
     }
-
-    // Initialize client
-    clients[slot].socket = client_socket;
-    clients[slot].addr = client_addr;
-    clients[slot].active = 1;
-    clients[slot].current_room[0] = '\0';
-    pthread_mutex_unlock(&clients_mutex);
-
-    // Create client handler thread
-    pthread_t client_thread;
-    pthread_create(&client_thread, NULL, client_handler, &clients[slot]);
-    pthread_detach(client_thread);
-}
 
     return 0;
 }
@@ -326,17 +316,9 @@ void* file_transfer_handler(void* arg) {
     while (server_running) {
         sem_wait(&upload_queue.items);
         
-        // Check again after sem_wait in case we were signaled to exit
         if (!server_running) break;
 
         pthread_mutex_lock(&upload_queue.mutex);
-        
-        // Double check queue isn't empty (defensive programming)
-        if (upload_queue.count == 0) {
-            pthread_mutex_unlock(&upload_queue.mutex);
-            continue;
-        }
-        
         FileTransfer transfer = upload_queue.queue[upload_queue.front];
         upload_queue.front = (upload_queue.front + 1) % MAX_UPLOAD_QUEUE;
         upload_queue.count--;
@@ -347,38 +329,20 @@ void* file_transfer_handler(void* arg) {
 
         // Find receiver
         Client* receiver = find_client_by_username(transfer.receiver);
-        char sender_msg[512];
-        
         if (receiver && receiver->active) {
-            // Notify receiver
             char notification[512];
             snprintf(notification, sizeof(notification), 
                 "[FILE] Received '%s' from %s (%zu bytes)\n", 
                 transfer.filename, transfer.sender, transfer.file_size);
             send_to_client(receiver->socket, notification);
             
-            // Notify sender
-            snprintf(sender_msg, sizeof(sender_msg),
-                "[FILE] %s received your file '%s' (%zu bytes)\n",
-                transfer.receiver, transfer.filename, transfer.file_size);
-            
             log_message("[SEND FILE] '%s' sent from %s to %s (success)", 
                 transfer.filename, transfer.sender, transfer.receiver);
         } else {
-            // Notify sender of failure
-            snprintf(sender_msg, sizeof(sender_msg),
-                "[FILE] Failed to send '%s' - %s offline\n",
-                transfer.filename, transfer.receiver);
-            
             log_message("[SEND FILE] '%s' from %s to %s (failed - user offline)", 
                 transfer.filename, transfer.sender, transfer.receiver);
         }
 
-        Client* sender = find_client_by_username(transfer.sender);
-        if (sender && sender->active) {
-            send_to_client(sender->socket, sender_msg);
-        }
-        
         if (transfer.file_data) {
             free(transfer.file_data);
         }
@@ -416,46 +380,17 @@ void send_to_client(int socket, const char* message) {
 void broadcast_to_room(const char* room_name, const char* message, const char* sender) {
     pthread_mutex_lock(&rooms_mutex);
     
-    Room* target_room = NULL;
     for (int i = 0; i < MAX_ROOMS; i++) {
         if (rooms[i].active && strcmp(rooms[i].name, room_name) == 0) {
-            target_room = &rooms[i];
-            break;
-        }
-    }
-
-    if (target_room) {
-        // Format message for history (without newline)
-        char formatted_msg[BUFFER_SIZE];
-        snprintf(formatted_msg, sizeof(formatted_msg), "[%s] %s: %s", room_name, sender, message);
-
-        // Add to history buffer
-        if (target_room->history_count < 10) {
-            strncpy(target_room->history[target_room->history_count], formatted_msg, MAX_MESSAGE_LEN+49);
-            target_room->history[target_room->history_count][MAX_MESSAGE_LEN+49] = '\0';
-            target_room->history_count++;
-        } else {
-            for (int i = 0; i < 9; i++) {
-                strncpy(target_room->history[i], target_room->history[i+1], MAX_MESSAGE_LEN+49);
-                target_room->history[i][MAX_MESSAGE_LEN+49] = '\0';
-            }
-            strncpy(target_room->history[9], formatted_msg, MAX_MESSAGE_LEN+49);
-            target_room->history[9][MAX_MESSAGE_LEN+49] = '\0';
-        }
-
-        // Broadcast to members
-        for (int j = 0; j < target_room->member_count; j++) {
-            if (target_room->members[j] && target_room->members[j]->active &&
-                strcmp(target_room->members[j]->username, sender) != 0) {
-                // Send with newline in separate buffer
-                char send_buffer[BUFFER_SIZE];
-                int len = snprintf(send_buffer, sizeof(send_buffer), "%s\n", formatted_msg);
-                if (len >= sizeof(send_buffer)) {
-                    send_buffer[sizeof(send_buffer)-2] = '\n';
-                    send_buffer[sizeof(send_buffer)-1] = '\0';
+            for (int j = 0; j < rooms[i].member_count; j++) {
+                if (rooms[i].members[j] && rooms[i].members[j]->active &&
+                    strcmp(rooms[i].members[j]->username, sender) != 0) {
+                    char formatted_msg[BUFFER_SIZE];
+                    snprintf(formatted_msg, sizeof(formatted_msg), "[%s] %s: %s\n", room_name, sender, message);
+                    send_to_client(rooms[i].members[j]->socket, formatted_msg);
                 }
-                send_to_client(target_room->members[j]->socket, send_buffer);
             }
+            break;
         }
     }
     
@@ -496,12 +431,6 @@ void handle_join_room(Client* client, const char* room_name) {
     
     log_message("[JOIN] user '%s' joined room '%s'", client->username, room_name);
     printf("[COMMAND] %s joined room '%s'\n", client->username, room_name); 
-
-    for (int i = 0; i < room->history_count; i++) {
-        char hist_msg[BUFFER_SIZE];
-        snprintf(hist_msg, sizeof(hist_msg), "[HISTORY] %s\n", room->history[i]);
-        send_to_client(client->socket, hist_msg);
-    }
 }
 
 void handle_leave_room(Client* client) {
@@ -670,14 +599,12 @@ void signal_handler(int sig) {
         printf("\n[SHUTDOWN] SIGINT received. Shutting down server...\n");
         server_running = 0;
         
-        // Count active clients and notify them
+        // Count active clients
         int active_count = 0;
         pthread_mutex_lock(&clients_mutex);
         for (int i = 0; i < MAX_CLIENTS; i++) {
             if (clients[i].active) {
                 send_to_client(clients[i].socket, "[SERVER] Server shutting down. Goodbye!\n");
-                close(clients[i].socket);  // Close client sockets
-                clients[i].active = 0;
                 active_count++;
             }
         }
@@ -685,32 +612,12 @@ void signal_handler(int sig) {
         
         log_message("[SHUTDOWN] SIGINT received. Disconnecting %d clients, saving logs.", active_count);
         
-        // Close server socket to unblock accept()
-        if (server_socket != -1) {
-            close(server_socket);
-            server_socket = -1;
-        }
-        
-        // Signal file transfer thread to exit
-        sem_post(&upload_queue.items);
-        
-        // Clean up resources
-        sem_destroy(&upload_queue.slots);
-        sem_destroy(&upload_queue.items);
-        pthread_mutex_destroy(&upload_queue.mutex);
-        pthread_mutex_destroy(&clients_mutex);
-        pthread_mutex_destroy(&rooms_mutex);
-        pthread_mutex_destroy(&log_mutex);
-        
-        if (log_file) {
-            fclose(log_file);
-        }
-        
-        printf("[SHUTDOWN] Server shutdown complete.\n");
+        // Clean up
+        close(server_socket);
+        fclose(log_file);
         exit(0);
     }
 }
-
 
 int validate_username(const char* username) {
     if (!username || strlen(username) == 0 || strlen(username) > MAX_USERNAME_LEN) {
@@ -756,16 +663,12 @@ int validate_filename(const char* filename) {
 }
 
 Client* find_client_by_username(const char* username) {
-    Client* result = NULL;
-    pthread_mutex_lock(&clients_mutex);
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i].active && strcmp(clients[i].username, username) == 0) {
-            result = &clients[i];
-            break;
+            return &clients[i];
         }
     }
-    pthread_mutex_unlock(&clients_mutex);
-    return result;
+    return NULL;
 }
 
 Room* find_or_create_room(const char* room_name) {
@@ -782,7 +685,6 @@ Room* find_or_create_room(const char* room_name) {
             strcpy(rooms[i].name, room_name);
             rooms[i].active = 1;
             rooms[i].member_count = 0;
-            rooms[i].history_count = 0; // Initialize history count
             return &rooms[i];
         }
     }
