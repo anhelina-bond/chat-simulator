@@ -167,9 +167,18 @@ int main(int argc, char* argv[]) {
 
         if (client_socket == -1) {
             if (server_running) {
-                perror("Accept failed");
+                // Only print error if server is still supposed to be running
+                if (errno != EINTR) {  // Ignore interrupted system calls
+                    perror("Accept failed");
+                }
             }
             continue;
+        }
+
+        // Check if server is still running after accept returns
+        if (!server_running) {
+            close(client_socket);
+            break;
         }
 
         // Find available client slot
@@ -187,20 +196,20 @@ int main(int argc, char* argv[]) {
             send_to_client(client_socket, "[ERROR] Server full. Try again later.\n");
             close(client_socket);
             continue;
-        }
-
-        // Initialize client
-        clients[slot].socket = client_socket;
-        clients[slot].addr = client_addr;
-        clients[slot].active = 1;
-        clients[slot].current_room[0] = '\0';
-        pthread_mutex_unlock(&clients_mutex);
-
-        // Create client handler thread
-        pthread_t client_thread;
-        pthread_create(&client_thread, NULL, client_handler, &clients[slot]);
-        pthread_detach(client_thread);
     }
+
+    // Initialize client
+    clients[slot].socket = client_socket;
+    clients[slot].addr = client_addr;
+    clients[slot].active = 1;
+    clients[slot].current_room[0] = '\0';
+    pthread_mutex_unlock(&clients_mutex);
+
+    // Create client handler thread
+    pthread_t client_thread;
+    pthread_create(&client_thread, NULL, client_handler, &clients[slot]);
+    pthread_detach(client_thread);
+}
 
     return 0;
 }
@@ -317,9 +326,17 @@ void* file_transfer_handler(void* arg) {
     while (server_running) {
         sem_wait(&upload_queue.items);
         
+        // Check again after sem_wait in case we were signaled to exit
         if (!server_running) break;
 
         pthread_mutex_lock(&upload_queue.mutex);
+        
+        // Double check queue isn't empty (defensive programming)
+        if (upload_queue.count == 0) {
+            pthread_mutex_unlock(&upload_queue.mutex);
+            continue;
+        }
+        
         FileTransfer transfer = upload_queue.queue[upload_queue.front];
         upload_queue.front = (upload_queue.front + 1) % MAX_UPLOAD_QUEUE;
         upload_queue.count--;
@@ -330,7 +347,7 @@ void* file_transfer_handler(void* arg) {
 
         // Find receiver
         Client* receiver = find_client_by_username(transfer.receiver);
-        char sender_msg[512];  // Increased buffer size
+        char sender_msg[512];
         
         if (receiver && receiver->active) {
             // Notify receiver
@@ -362,7 +379,6 @@ void* file_transfer_handler(void* arg) {
             send_to_client(sender->socket, sender_msg);
         }
         
-
         if (transfer.file_data) {
             free(transfer.file_data);
         }
@@ -654,12 +670,14 @@ void signal_handler(int sig) {
         printf("\n[SHUTDOWN] SIGINT received. Shutting down server...\n");
         server_running = 0;
         
-        // Count active clients
+        // Count active clients and notify them
         int active_count = 0;
         pthread_mutex_lock(&clients_mutex);
         for (int i = 0; i < MAX_CLIENTS; i++) {
             if (clients[i].active) {
                 send_to_client(clients[i].socket, "[SERVER] Server shutting down. Goodbye!\n");
+                close(clients[i].socket);  // Close client sockets
+                clients[i].active = 0;
                 active_count++;
             }
         }
@@ -667,12 +685,32 @@ void signal_handler(int sig) {
         
         log_message("[SHUTDOWN] SIGINT received. Disconnecting %d clients, saving logs.", active_count);
         
-        // Clean up
-        close(server_socket);
-        fclose(log_file);
+        // Close server socket to unblock accept()
+        if (server_socket != -1) {
+            close(server_socket);
+            server_socket = -1;
+        }
+        
+        // Signal file transfer thread to exit
+        sem_post(&upload_queue.items);
+        
+        // Clean up resources
+        sem_destroy(&upload_queue.slots);
+        sem_destroy(&upload_queue.items);
+        pthread_mutex_destroy(&upload_queue.mutex);
+        pthread_mutex_destroy(&clients_mutex);
+        pthread_mutex_destroy(&rooms_mutex);
+        pthread_mutex_destroy(&log_mutex);
+        
+        if (log_file) {
+            fclose(log_file);
+        }
+        
+        printf("[SHUTDOWN] Server shutdown complete.\n");
         exit(0);
     }
 }
+
 
 int validate_username(const char* username) {
     if (!username || strlen(username) == 0 || strlen(username) > MAX_USERNAME_LEN) {
