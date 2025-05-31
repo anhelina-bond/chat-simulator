@@ -718,13 +718,12 @@ int validate_filename(const char* filename) {
 }
 
 Client* find_client_by_username(const char* username) {
-    pthread_mutex_lock(&clients_mutex);
+    
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i].active && strcmp(clients[i].username, username) == 0) {
             return &clients[i];
         }
     }
-    pthread_mutex_unlock(&clients_mutex);
     return NULL;
 }
 
