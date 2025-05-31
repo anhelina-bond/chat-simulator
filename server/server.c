@@ -718,13 +718,16 @@ int validate_filename(const char* filename) {
 }
 
 Client* find_client_by_username(const char* username) {
-    
+    Client* result = NULL;
+    pthread_mutex_lock(&clients_mutex);
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i].active && strcmp(clients[i].username, username) == 0) {
-            return &clients[i];
+            result = &clients[i];
+            break;
         }
     }
-    return NULL;
+    pthread_mutex_unlock(&clients_mutex);
+    return result;
 }
 
 Room* find_or_create_room(const char* room_name) {
@@ -741,6 +744,7 @@ Room* find_or_create_room(const char* room_name) {
             strcpy(rooms[i].name, room_name);
             rooms[i].active = 1;
             rooms[i].member_count = 0;
+            rooms[i].history_count = 0; // Initialize history count
             return &rooms[i];
         }
     }
